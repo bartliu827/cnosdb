@@ -1,6 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::borrow::Borrow;
+use std::fs::File;
+use std::io::Write;
 use std::ops::Not;
 use std::{collections::HashMap, convert::Infallible, net::SocketAddr, sync::Arc};
 
@@ -8,6 +10,7 @@ use coordinator::service::CoordinatorRef;
 use http_protocol::header::{ACCEPT, AUTHORIZATION};
 use http_protocol::parameter::{SqlParam, WriteParam};
 use http_protocol::response::ErrorResponse;
+use pprof::protos::Message;
 use query::prom::remote_server::PromRemoteSqlServer;
 use spi::server::prom::PromRemoteServerRef;
 
@@ -139,6 +142,7 @@ impl HttpService {
             .or(self.print_meta())
             .or(self.prom_remote_read())
             .or(self.prom_remote_write())
+            .or(self.gernate_pprof())
     }
 
     fn ping(&self) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
@@ -254,6 +258,40 @@ impl HttpService {
                 let data = meta_client.print_data();
 
                 Ok(data)
+            })
+    }
+
+    fn gernate_pprof(
+        &self,
+    ) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+        warp::path!("api" / "v1" / "pprof")
+            .and(self.handle_header())
+            .and(self.with_coord())
+            .and_then(|header: Header, coord: CoordinatorRef| async move {
+                let guard = pprof::ProfilerGuardBuilder::default()
+                    .frequency(1000)
+                    .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+                    .build()
+                    .unwrap();
+
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+                if let Ok(report) = guard.report().build() {
+                    let mut file = File::create("/tmp/cnosdb/profile.pb").unwrap();
+                    let profile = report.pprof().unwrap();
+                    let mut content = Vec::new();
+                    profile.write_to_vec(&mut content).unwrap();
+                    file.write_all(&content).unwrap();
+
+                    let file = File::create("/tmp/cnosdb/flamegraph.svg").unwrap();
+                    report.flamegraph(file).unwrap();
+                } else {
+                    return Err(reject::custom(HttpError::IOError {
+                        err: "pprof report error".to_string(),
+                    }));
+                };
+
+                Ok("".to_string())
             })
     }
 

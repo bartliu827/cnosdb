@@ -195,7 +195,7 @@ mod test {
         client::MetaHttpClient,
         store::command::{self, UpdateVnodeReplSetArgs},
     };
-    use std::{thread, time};
+    use std::{collections::HashMap, thread, time};
 
     use models::{
         meta_data::{NodeInfo, VnodeInfo},
@@ -325,5 +325,89 @@ mod test {
 
         let data = serde_json::to_string(&req).unwrap();
         println!("{}", data);
+    }
+    //                                               1641005850000000000
+    //select count(1) from readings_kv where time >= 1641002401000000000 and time <= 1641013191000000000;
+    //select count(1) from readings_kv where time >= 1641002401000000000 and time <= 1641005991000000000;
+    //select count(1) from readings_kv where time >= 1641005991000000001 and time <= 1641013191000000000;
+    #[tokio::test]
+    async fn analy_query_info() {
+        let data = std::fs::read_to_string("/tmp/cnosdb/read_debug1").unwrap();
+        let map1: HashMap<u32, Vec<i64>> = serde_json::from_str(&data).unwrap();
+
+        let data = std::fs::read_to_string("/tmp/cnosdb/read_debug2").unwrap();
+        let map2: HashMap<u32, Vec<i64>> = serde_json::from_str(&data).unwrap();
+
+        let data = std::fs::read_to_string("/tmp/cnosdb/read_debug3").unwrap();
+        let map3: HashMap<u32, Vec<i64>> = serde_json::from_str(&data).unwrap();
+
+        for (k, v) in map1.iter() {
+            for t in v.iter() {
+                if find_in_map(*k, *t, &map2) || find_in_map(*k, *t, &map3) {
+                    continue;
+                }
+
+                println!("=== can't found: {}  {}", k, t);
+            }
+        }
+
+        // let mut total_count1 = 0;
+        // let mut total_count2 = 0;
+        // let mut total_count3 = 0;
+        // for (k, v) in map1.iter() {
+        //     for t in v.iter() {
+        //         total_count1 += 1;
+        //         let count = count_list(*t, v);
+        //         if count > 1 {
+        //             println!("=== find dup 1: {}  {} {}", k, t, count);
+        //         }
+        //     }
+        // }
+
+        // for (k, v) in map2.iter() {
+        //     for t in v.iter() {
+        //         total_count2 += 1;
+        //         let count = count_list(*t, v);
+        //         if count > 1 {
+        //             println!("=== find dup 2: {}  {} {}", k, t, count);
+        //         }
+        //     }
+        // }
+
+        // for (k, v) in map3.iter() {
+        //     for t in v.iter() {
+        //         total_count3 += 1;
+        //         let count = count_list(*t, v);
+        //         if count > 1 {
+        //             println!("=== find dup 3: {}  {} {}", k, t, count);
+        //         }
+        //     }
+        // }
+
+        // println!(
+        //     "=== total count: {} {} {}",
+        //     total_count1, total_count2, total_count3
+        // );
+    }
+
+    fn find_in_map(k: u32, t: i64, map: &HashMap<u32, Vec<i64>>) -> bool {
+        if let Some(list) = map.get(&k) {
+            if list.contains(&t) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn count_list(t: i64, list: &Vec<i64>) -> usize {
+        let mut count = 0;
+        for v in list.iter() {
+            if *v == t {
+                count += 1;
+            }
+        }
+
+        count
     }
 }

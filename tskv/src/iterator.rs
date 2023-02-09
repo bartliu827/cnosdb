@@ -593,6 +593,10 @@ pub struct RowIterator {
     columns: Vec<CursorPtr>,
     version: Option<Arc<SuperVersion>>,
 
+    time_ranges: Vec<TimeRange>,
+
+    debug_info: HashMap<u32, Vec<i64>>,
+
     open_files: HashMap<ColumnFileId, Arc<TsmReader>>,
 
     batch_size: usize,
@@ -619,6 +623,8 @@ impl RowIterator {
 
         info!("vnode_id: {}, series number: {}", vnode_id, series.len());
 
+        let time_ranges: Vec<TimeRange> = filter_to_time_ranges(&option.time_filter);
+
         let metrics = option.metrics.clone();
         let batch_size = option.batch_size;
         Ok(Self {
@@ -628,9 +634,13 @@ impl RowIterator {
             version,
             vnode_id,
 
+            time_ranges,
+
             columns: vec![],
             series_index: usize::MAX,
             open_files: HashMap::new(),
+
+            debug_info: HashMap::new(),
 
             batch_size,
             metrics,
@@ -766,6 +776,20 @@ impl RowIterator {
             self.columns.clear();
             return Ok(None);
         }
+
+        let time_predicate = |ts| {
+            self.time_ranges
+                .iter()
+                .any(|time_range| time_range.is_boundless() || time_range.contains(ts))
+        };
+
+        if !time_predicate(min_time) {
+            return Ok(None);
+        }
+
+        let sid = self.series[self.series_index];
+        let entry = self.debug_info.entry(sid).or_insert(vec![]);
+        entry.push(min_time);
 
         let timer = self.metrics.elapsed_point_to_record_batch().timer();
 
@@ -914,6 +938,10 @@ impl RowIterator {
 impl RowIterator {
     pub async fn next(&mut self) -> Option<Result<RecordBatch, Error>> {
         if self.is_finish() {
+            let data = serde_json::to_string(&self.debug_info).unwrap();
+            std::fs::write("/tmp/cnosdb/read_debug", data).unwrap();
+
+            self.debug_info.clear();
             return None;
         }
 

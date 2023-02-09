@@ -71,6 +71,12 @@ pub enum Error {
     NotFoundTenant {
         name: String,
     },
+
+    #[snafu(display("io operator error: {}", err))]
+    #[error_code(code = 9)]
+    IOError {
+        err: String,
+    },
 }
 
 impl From<tskv::Error> for Error {

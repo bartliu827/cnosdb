@@ -601,7 +601,13 @@ mod test {
 
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use lru::LruCache;
-    use models::{schema::ExternalTableSchema, utils::now_timestamp, SeriesKey, Tag};
+    use models::{
+        schema::ExternalTableSchema,
+        utils::{now_timestamp, unite_id},
+        SeriesKey, Tag,
+    };
+
+    use crate::index::IndexEngine;
 
     use super::TSIndex;
 
@@ -725,4 +731,19 @@ mod test {
         }
         println!("{}", now_timestamp() / 1000000);
     }
+
+    #[test]
+    fn test_get_series_key() {
+        println!("===== {}", unite_id(2, 1982));
+        let sid = 13;
+        let storage = IndexEngine::new("/tmp/cnosdb/1001/db/data/cnosdb.my_db/3/index").unwrap();
+        if let Some(res) = storage.get(&super::encode_series_id_key(sid)).unwrap() {
+            let key = SeriesKey::decode(&res).unwrap();
+            println!("{}: {}", sid, key.string());
+        }
+    }
+    // 93:  readings_kv. and device_version='v2_0' and driver='Trish' and fleet='West'and model='G_2000' and name='truck_2285'
+    // 1982 readings_kv. and device_version='v1_0' and driver='Seth' and fleet='South' and model='F_150' and name='truck_2938'
+    // 2173 readings_kv. and device_version='v2_0' and driver='Rodney' and fleet='South' and model='G_2000' and name='truck_3833'
+    // 2137 readings_kv. and device_version='v1_0' and driver='Derek' and fleet='South' and model='G_2000' and name='truck_580'
 }
