@@ -16,7 +16,6 @@ use crate::{
     database::Database,
     error::{self, Error, Result},
     schema::schemas::DBschemas,
-    tseries_family::{ColumnFile, TseriesFamily},
     tsm::{DataBlock, TsmReader},
     TimeRange, TseriesFamilyId,
 };
@@ -889,6 +888,7 @@ mod test {
                 None,
                 engine.summary_task_sender(),
                 engine.flush_task_sender(),
+                engine.compact_task_sender(),
             );
             assert_eq!(1, ts_family.read().tf_id());
         }
