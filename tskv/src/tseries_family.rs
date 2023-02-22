@@ -1,46 +1,38 @@
-use std::{
-    borrow::{Borrow, BorrowMut},
-    cmp::{self, max, min},
-    collections::{HashMap, HashSet},
-    ops::{Bound, Deref, DerefMut},
-    path::{Path, PathBuf},
-    rc::Rc,
-    sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::borrow::{Borrow, BorrowMut};
+use std::cmp::{self, max, min};
+use std::collections::{HashMap, HashSet};
+use std::ops::{Bound, Deref, DerefMut};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use config::get_config;
 use lazy_static::lazy_static;
 use lru_cache::ShardedCache;
-use models::{
-    schema::TableColumn, ColumnId, FieldId, InMemPoint, SchemaId, SeriesId, Timestamp, ValueType,
-};
+use models::schema::TableColumn;
+use models::{ColumnId, FieldId, InMemPoint, SchemaId, SeriesId, Timestamp, ValueType};
 use parking_lot::{Mutex, RwLock};
-use tokio::{
-    runtime::Runtime,
-    sync::{mpsc::UnboundedSender, watch::Receiver},
-    time::Instant,
-};
+use tokio::runtime::Runtime;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::watch::Receiver;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use trace::{debug, error, info, warn};
 use utils::BloomFilter;
 
-use crate::{
-    compaction::{CompactReq, FlushReq, LevelCompactionPicker, Picker},
-    error::{Error, Result},
-    file_system::file_manager,
-    file_utils::{self, make_delta_file_name, make_tsm_file_name},
-    kv_option::{CacheOptions, Options, StorageOptions},
-    memcache::{DataType, MemCache, RowGroup},
-    summary::{CompactMeta, VersionEdit},
-    tsm::{
-        BlockMetaIterator, ColumnReader, DataBlock, Index, IndexReader, TsmReader, TsmTombstone,
-    },
-    ColumnFileId, LevelId, TseriesFamilyId,
+use crate::compaction::{CompactReq, CompactTask, FlushReq, LevelCompactionPicker, Picker};
+use crate::error::{Error, Result};
+use crate::file_system::file_manager;
+use crate::file_utils::{self, make_delta_file_name, make_tsm_file_name};
+use crate::kv_option::{CacheOptions, Options, StorageOptions};
+use crate::memcache::{DataType, MemCache, RowGroup};
+use crate::summary::{CompactMeta, VersionEdit};
+use crate::tsm::{
+    BlockMetaIterator, ColumnReader, DataBlock, Index, IndexReader, TsmReader, TsmTombstone,
 };
+use crate::{ColumnFileId, LevelId, TseriesFamilyId};
 
 lazy_static! {
     pub static ref FLUSH_REQ: Arc<Mutex<Vec<FlushReq>>> = Arc::new(Mutex::new(vec![]));
@@ -614,19 +606,17 @@ pub struct TseriesFamily {
     database: Arc<String>,
     mut_cache: Arc<RwLock<MemCache>>,
     immut_cache: Vec<Arc<RwLock<MemCache>>>,
-    tsm_reader_cache: ShardedCache<String, TsmReader>,
     super_version: Arc<SuperVersion>,
     super_version_id: AtomicU64,
     version: Arc<Version>,
     cache_opt: Arc<CacheOptions>,
     storage_opt: Arc<StorageOptions>,
-    compact_picker: Arc<dyn Picker>,
     seq_no: u64,
     immut_ts_min: AtomicI64,
     mut_ts_max: AtomicI64,
-    last_modified: Arc<RwLock<Option<Instant>>>,
-    flush_task_sender: UnboundedSender<FlushReq>,
-    compact_task_sender: UnboundedSender<TseriesFamilyId>,
+    last_modified: Arc<tokio::sync::RwLock<Option<Instant>>>,
+    flush_task_sender: Sender<FlushReq>,
+    compact_task_sender: Sender<CompactTask>,
     cancellation_token: CancellationToken,
 }
 
@@ -639,8 +629,8 @@ impl TseriesFamily {
         version: Arc<Version>,
         cache_opt: Arc<CacheOptions>,
         storage_opt: Arc<StorageOptions>,
-        flush_task_sender: UnboundedSender<FlushReq>,
-        compact_task_sender: UnboundedSender<TseriesFamilyId>,
+        flush_task_sender: Sender<FlushReq>,
+        compact_task_sender: Sender<CompactTask>,
     ) -> Self {
         let mm = Arc::new(RwLock::new(cache));
         let seq = version.last_seq;
@@ -653,7 +643,6 @@ impl TseriesFamily {
             seq_no: seq,
             mut_cache: mm.clone(),
             immut_cache: Default::default(),
-            tsm_reader_cache: ShardedCache::with_capacity(16),
             super_version: Arc::new(SuperVersion::new(
                 tf_id,
                 storage_opt.clone(),
@@ -668,10 +657,9 @@ impl TseriesFamily {
             version,
             cache_opt,
             storage_opt,
-            compact_picker,
             immut_ts_min: AtomicI64::new(max_level_ts),
             mut_ts_max: AtomicI64::new(i64::MIN),
-            last_modified: Arc::new(RwLock::new(None)),
+            last_modified: Arc::new(tokio::sync::RwLock::new(None)),
             flush_task_sender,
             compact_task_sender,
             cancellation_token: CancellationToken::new(),
@@ -725,13 +713,8 @@ impl TseriesFamily {
     /// If argument force is set to true, then do not check immutable caches number.
     pub(crate) fn flush_req(&mut self, force: bool) -> Option<FlushReq> {
         let len = self.immut_cache.len();
-        let mut imut = vec![];
-        for mem in self.immut_cache.iter() {
-            if !mem.read().flushed {
-                imut.push(mem.clone());
-            }
-        }
-        self.immut_cache = imut;
+
+        self.immut_cache.retain(|mem| !mem.read().flushed);
 
         if len != self.immut_cache.len() {
             self.new_super_version(self.version.clone());
@@ -739,13 +722,14 @@ impl TseriesFamily {
 
         self.immut_ts_min
             .store(self.mut_ts_max.load(Ordering::Relaxed), Ordering::Relaxed);
-        let mut req_mems: Vec<(u32, Arc<RwLock<MemCache>>)> = vec![];
-        for mem in self.immut_cache.iter() {
-            if mem.read().flushing {
-                continue;
-            }
-            req_mems.push((self.tf_id, mem.clone()));
-        }
+
+        let req_mems = self
+            .immut_cache
+            .iter()
+            .filter(|mem| !mem.read().flushing)
+            .cloned()
+            .map(|mem| (self.tf_id, mem))
+            .collect::<Vec<_>>();
 
         if !force && req_mems.len() < self.cache_opt.max_immutable_number as usize {
             return None;
@@ -759,19 +743,23 @@ impl TseriesFamily {
         Some(FlushReq { mems: req_mems })
     }
 
-    pub(crate) fn wrap_flush_req(&mut self, force: bool) {
+    pub(crate) async fn wrap_flush_req(&mut self, force: bool) {
         if let Some(req) = self.flush_req(force) {
             self.flush_task_sender
                 .send(req)
+                .await
                 .expect("error send flush req to kvcore");
         }
     }
 
-    pub fn put_points(&self, seq: u64, points: HashMap<(SeriesId, SchemaId), RowGroup>) {
+    pub fn put_points(&self, seq: u64, points: HashMap<(SeriesId, SchemaId), RowGroup>) -> u64 {
+        let mut res = 0;
         for ((sid, schema_id), group) in points {
             let mem = self.super_version.caches.mut_cache.read();
+            res += group.rows.len();
             mem.write_group(sid, seq, group);
         }
+        res as u64
     }
 
     // pub async fn touch_flush(tsf: &mut TseriesFamily) {
@@ -783,18 +771,18 @@ impl TseriesFamily {
     //     );
     // }
 
-    pub fn check_to_flush(&mut self) {
+    pub async fn check_to_flush(&mut self) {
         if self.super_version.caches.mut_cache.read().is_full() {
             info!("mut_cache full,switch to immutable");
             self.switch_to_immutable();
             if self.immut_cache.len() >= self.cache_opt.max_immutable_number as usize {
-                self.wrap_flush_req(false);
+                self.wrap_flush_req(false).await;
             }
         }
     }
 
-    pub fn update_last_modfied(&self) {
-        *self.last_modified.write() = Some(Instant::now());
+    pub async fn update_last_modfied(&self) {
+        *self.last_modified.write().await = Some(Instant::now());
     }
 
     pub fn delete_columns(&self, field_ids: &[FieldId]) {
@@ -827,10 +815,6 @@ impl TseriesFamily {
         }
     }
 
-    pub fn pick_compaction(&self) -> Option<CompactReq> {
-        self.compact_picker.pick_compaction(self.version.clone())
-    }
-
     pub fn schedule_compaction(&self, runtime: Arc<Runtime>) {
         let tsf_id = self.tf_id;
         let compact_trigger_cold_duration = self.storage_opt.compact_trigger_cold_duration;
@@ -840,15 +824,15 @@ impl TseriesFamily {
         let jh = runtime.spawn(async move {
             if compact_trigger_cold_duration == Duration::ZERO {
             } else {
-                let mut code_check_interval = tokio::time::interval(Duration::from_secs(10));
-                code_check_interval.tick().await;
+                let mut cold_check_interval = tokio::time::interval(Duration::from_secs(10));
+                cold_check_interval.tick().await;
                 loop {
                     tokio::select! {
-                        _ = code_check_interval.tick() => {
-                            let last_modified = last_modified.read();
+                        _ = cold_check_interval.tick() => {
+                            let last_modified = last_modified.read().await;
                             if let Some(t) = *last_modified {
                                 if t.elapsed() >= compact_trigger_cold_duration {
-                                    if let Err(e) = compact_task_sender.send(tsf_id) {
+                                    if let Err(e) = compact_task_sender.send(CompactTask::ColdVnode(tsf_id)).await {
                                         warn!("failed to send compact task({}), {}", tsf_id, e);
                                     }
                                 }
@@ -941,40 +925,37 @@ impl Drop for TseriesFamily {
 
 #[cfg(test)]
 mod test {
-    use std::collections::hash_map;
+    use std::collections::{hash_map, HashMap};
     use std::mem::{size_of, size_of_val};
-    use std::{collections::HashMap, path::PathBuf, sync::Arc};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
 
+    use config::{get_config, ClusterConfig};
     use lru_cache::ShardedCache;
     use meta::meta_manager::RemoteMetaManager;
     use meta::MetaRef;
-    use models::{
-        schema::{DatabaseSchema, TenantOptions},
-        Timestamp, ValueType,
-    };
+    use models::schema::{DatabaseSchema, TenantOptions};
+    use models::{Timestamp, ValueType};
     use parking_lot::{Mutex, RwLock};
-    use tokio::sync::{
-        mpsc::{self, UnboundedReceiver},
-        RwLock as AsyncRwLock,
-    };
-    use trace::info;
-
-    use crate::{
-        compaction::{flush_tests::default_with_field_id, run_flush_memtable_job, FlushReq},
-        context::GlobalContext,
-        file_system::file_manager,
-        file_utils::{self, make_tsm_file_name},
-        kv_option::Options,
-        memcache::{FieldVal, MemCache, RowData, RowGroup},
-        summary::{CompactMeta, SummaryTask, VersionEdit},
-        tseries_family::{TimeRange, TseriesFamily, Version},
-        tsm::TsmTombstone,
-        version_set::VersionSet,
-        TseriesFamilyId,
-    };
-    use config::{get_config, ClusterConfig};
+    use tokio::sync::mpsc::{self, Receiver};
+    use tokio::sync::RwLock as AsyncRwLock;
+    use trace::{error, info};
 
     use super::{ColumnFile, LevelInfo};
+    use crate::compaction::flush_tests::default_with_field_id;
+    use crate::compaction::{run_flush_memtable_job, FlushReq};
+    use crate::context::GlobalContext;
+    use crate::file_system::file_manager;
+    use crate::file_utils::{self, make_tsm_file_name};
+    use crate::kv_option::Options;
+    use crate::kvcore::{COMPACT_REQ_CHANNEL_CAP, SUMMARY_REQ_CHANNEL_CAP};
+    use crate::memcache::{FieldVal, MemCache, RowData, RowGroup};
+    use crate::summary::{CompactMeta, SummaryTask, VersionEdit};
+    use crate::tseries_family::{TimeRange, TseriesFamily, Version};
+    use crate::tsm::TsmTombstone;
+    use crate::version_set::VersionSet;
+    use crate::TseriesFamilyId;
 
     #[tokio::test]
     async fn test_version_apply_version_edits_1() {
@@ -1217,8 +1198,8 @@ mod test {
         global_config.storage.path = dir.to_string();
         let opt = Arc::new(Options::from(&global_config));
 
-        let (flush_task_sender, _) = mpsc::unbounded_channel();
-        let (compact_task_sender, _) = mpsc::unbounded_channel();
+        let (flush_task_sender, _) = mpsc::channel(opt.storage.flush_req_channel_cap);
+        let (compact_task_sender, _) = mpsc::channel(COMPACT_REQ_CHANNEL_CAP);
         let database = Arc::new("db".to_string());
         let tsf = TseriesFamily::new(
             0,
@@ -1240,7 +1221,7 @@ mod test {
         );
 
         let row_group = RowGroup {
-            schema: default_with_field_id(vec![0, 1, 2]),
+            schema: default_with_field_id(vec![0, 1, 2]).into(),
             range: TimeRange {
                 min_ts: 1,
                 max_ts: 100,
@@ -1281,7 +1262,7 @@ mod test {
     async fn update_ts_family_version(
         version_set: Arc<tokio::sync::RwLock<VersionSet>>,
         ts_family_id: TseriesFamilyId,
-        mut summary_task_receiver: UnboundedReceiver<SummaryTask>,
+        mut summary_task_receiver: Receiver<SummaryTask>,
     ) {
         let mut version_edits: Vec<VersionEdit> = Vec::new();
         let mut min_seq: u64 = 0;
@@ -1301,7 +1282,7 @@ mod test {
         }
         let version_set = version_set.write().await;
         if let Some(ts_family) = version_set.get_tsfamily_by_tf_id(ts_family_id).await {
-            let mut ts_family = ts_family.write();
+            let mut ts_family = ts_family.write().await;
             let new_version = ts_family.version().copy_apply_version_edits(
                 version_edits,
                 &mut HashMap::new(),
@@ -1343,7 +1324,7 @@ mod test {
 
         let mem = MemCache::new(0, 1000, 0);
         let row_group = RowGroup {
-            schema: default_with_field_id(vec![0, 1, 2]),
+            schema: default_with_field_id(vec![0, 1, 2]).into(),
             range: TimeRange {
                 min_ts: 1,
                 max_ts: 100,
@@ -1374,9 +1355,9 @@ mod test {
         let tenant = "cnosdb".to_string();
         let database = "test_db".to_string();
         let kernel = Arc::new(GlobalContext::new());
-        let (summary_task_sender, summary_task_receiver) = mpsc::unbounded_channel();
-        let (compact_task_sender, compact_task_receiver) = mpsc::unbounded_channel();
-        let (flush_task_sender, _) = mpsc::unbounded_channel();
+        let (summary_task_sender, summary_task_receiver) = mpsc::channel(SUMMARY_REQ_CHANNEL_CAP);
+        let (compact_task_sender, compact_task_receiver) = mpsc::channel(COMPACT_REQ_CHANNEL_CAP);
+        let (flush_task_sender, _) = mpsc::channel(opt.storage.flush_req_channel_cap);
 
         let runtime_ref = runtime.clone();
         runtime.block_on(async move {
@@ -1418,7 +1399,9 @@ mod test {
                     flush_task_sender.clone(),
                     compact_task_sender.clone(),
                 )
+                .await
                 .read()
+                .await
                 .tf_id();
 
             run_flush_memtable_job(
@@ -1426,7 +1409,7 @@ mod test {
                 kernel,
                 version_set.clone(),
                 summary_task_sender,
-                compact_task_sender,
+                Some(compact_task_sender),
             )
             .await
             .unwrap();
@@ -1439,7 +1422,7 @@ mod test {
                 .get_tsfamily_by_name(&tenant, &database)
                 .await
                 .unwrap();
-            let version = tsf.write().version();
+            let version = tsf.write().await.version();
             version.levels_info[1]
                 .read_column_file(
                     ts_family_id,

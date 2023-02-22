@@ -1,13 +1,9 @@
 use async_trait::async_trait;
-
-use spi::query::{
-    execution::{Output, QueryStateMachineRef},
-    logical_planner::MoveVnode,
-};
+use spi::query::execution::{Output, QueryStateMachineRef};
+use spi::query::logical_planner::MoveVnode;
+use spi::Result;
 
 use super::DDLDefinitionTask;
-
-use spi::Result;
 
 pub struct MoveVnodeTask {
     stmt: MoveVnode,
@@ -28,7 +24,9 @@ impl DDLDefinitionTask for MoveVnodeTask {
 
         let coord = query_state_machine.coord.clone();
         let cmd_type = coordinator::command::VnodeManagerCmdType::Move(node_id);
-        coord.vnode_manager(tenant, vnode_id, cmd_type).await?;
+        coord
+            .vnode_manager(tenant, vec![vnode_id], cmd_type)
+            .await?;
 
         Ok(Output::Nil(()))
     }

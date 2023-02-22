@@ -3,30 +3,28 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use config::{ClusterConfig, HintedOffConfig};
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
+use futures::TryFutureExt;
+use meta::error::MetaError;
+use meta::meta_client_mock::{MockMetaClient, MockMetaManager};
+use meta::meta_manager::RemoteMetaManager;
+use meta::{MetaClientRef, MetaRef};
 use models::consistency_level::ConsistencyLevel;
 use models::meta_data::{BucketInfo, DatabaseInfo, ExpiredBucketInfo, VnodeAllInfo};
 use models::predicate::domain::{ColumnDomains, PredicateRef};
 use models::schema::{DatabaseSchema, TableSchema, TskvTableSchema};
 use models::*;
-
-use protos::kv_service::WritePointsRpcRequest;
+use protos::kv_service::WritePointsRequest;
 use snafu::ResultExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
-
 use trace::info;
 use tskv::engine::{EngineRef, MockEngine};
-use tskv::TimeRange;
-
-use meta::meta_client_mock::{MockMetaClient, MockMetaManager};
-use meta::meta_manager::RemoteMetaManager;
-use meta::{MetaClientRef, MetaRef};
-
-use datafusion::arrow::datatypes::SchemaRef;
 use tskv::iterator::QueryOption;
+use tskv::TimeRange;
 
 use crate::command::*;
 use crate::errors::*;
@@ -41,13 +39,13 @@ pub type CoordinatorRef = Arc<dyn Coordinator>;
 pub trait Coordinator: Send + Sync + Debug {
     fn node_id(&self) -> u64;
     fn meta_manager(&self) -> MetaRef;
-    fn store_engine(&self) -> EngineRef;
+    fn store_engine(&self) -> Option<EngineRef>;
     async fn tenant_meta(&self, tenant: &str) -> Option<MetaClientRef>;
     async fn write_points(
         &self,
         tenant: String,
         level: ConsistencyLevel,
-        request: WritePointsRpcRequest,
+        request: WritePointsRequest,
     ) -> CoordinatorResult<()>;
 
     async fn exec_admin_stat_on_all_node(
@@ -55,12 +53,12 @@ pub trait Coordinator: Send + Sync + Debug {
         req: AdminStatementRequest,
     ) -> CoordinatorResult<()>;
 
-    async fn read_record(&self, option: QueryOption) -> CoordinatorResult<ReaderIterator>;
+    fn read_record(&self, option: QueryOption) -> CoordinatorResult<ReaderIterator>;
 
     async fn vnode_manager(
         &self,
         tenant: &str,
-        vnode_id: u32,
+        vnode_ids: Vec<u32>,
         cmd_type: VnodeManagerCmdType,
     ) -> CoordinatorResult<()>;
 }
@@ -78,8 +76,8 @@ impl Coordinator for MockCoordinator {
         Arc::new(MockMetaManager::default())
     }
 
-    fn store_engine(&self) -> EngineRef {
-        Arc::new(MockEngine::default())
+    fn store_engine(&self) -> Option<EngineRef> {
+        Some(Arc::new(MockEngine::default()))
     }
 
     async fn tenant_meta(&self, tenant: &str) -> Option<MetaClientRef> {
@@ -90,7 +88,7 @@ impl Coordinator for MockCoordinator {
         &self,
         tenant: String,
         level: ConsistencyLevel,
-        req: WritePointsRpcRequest,
+        req: WritePointsRequest,
     ) -> CoordinatorResult<()> {
         Ok(())
     }
@@ -102,7 +100,7 @@ impl Coordinator for MockCoordinator {
         Ok(())
     }
 
-    async fn read_record(&self, option: QueryOption) -> CoordinatorResult<ReaderIterator> {
+    fn read_record(&self, option: QueryOption) -> CoordinatorResult<ReaderIterator> {
         let (it, _) = ReaderIterator::new();
         Ok(it)
     }
@@ -110,7 +108,7 @@ impl Coordinator for MockCoordinator {
     async fn vnode_manager(
         &self,
         tenant: &str,
-        vnode_id: u32,
+        vnode_ids: Vec<u32>,
         cmd_type: VnodeManagerCmdType,
     ) -> CoordinatorResult<()> {
         Ok(())
@@ -121,14 +119,14 @@ impl Coordinator for MockCoordinator {
 pub struct CoordService {
     node_id: u64,
     meta: MetaRef,
-    kv_inst: EngineRef,
+    kv_inst: Option<EngineRef>,
     writer: Arc<PointWriter>,
     handoff: Arc<HintedOffManager>,
 }
 
 impl CoordService {
     pub async fn new(
-        kv_inst: EngineRef,
+        kv_inst: Option<EngineRef>,
         meta_manager: MetaRef,
         cluster: ClusterConfig,
         handoff_cfg: HintedOffConfig,
@@ -243,13 +241,18 @@ impl CoordService {
     async fn vnode_manager_request(
         &self,
         tenant: &str,
-        vnode_id: u32,
+        vnode_ids: Vec<u32>,
         cmd_type: VnodeManagerCmdType,
     ) -> CoordinatorResult<()> {
-        let all_info = self.get_vnode_all_info(tenant, vnode_id).await?;
-
+        if vnode_ids.is_empty() {
+            return Err(CoordinatorError::CommonError {
+                msg: "Please specify at least one vnode".to_string(),
+            });
+        }
         let (tcp_req, req_node_id) = match cmd_type {
             VnodeManagerCmdType::Copy(node_id) => {
+                let vnode_id = *vnode_ids.first().unwrap();
+                let all_info = self.get_vnode_all_info(tenant, vnode_id).await?;
                 if all_info.node_id == node_id {
                     return Err(CoordinatorError::CommonError {
                         msg: format!("Vnode: {} Already in {}", all_info.vnode_id, node_id),
@@ -266,6 +269,8 @@ impl CoordService {
             }
 
             VnodeManagerCmdType::Move(node_id) => {
+                let vnode_id = *vnode_ids.first().unwrap();
+                let all_info = self.get_vnode_all_info(tenant, vnode_id).await?;
                 if all_info.node_id == node_id {
                     return Err(CoordinatorError::CommonError {
                         msg: format!("move vnode: {} already in {}", all_info.vnode_id, node_id),
@@ -281,16 +286,58 @@ impl CoordService {
                 )
             }
 
-            VnodeManagerCmdType::Drop => (
-                AdminStatementRequest {
-                    tenant: tenant.to_string(),
-                    stmt: AdminStatementType::DeleteVnode {
-                        db: all_info.db_name.clone(),
-                        vnode_id,
+            VnodeManagerCmdType::Drop => {
+                let vnode_id = *vnode_ids.first().unwrap();
+                let all_info = self.get_vnode_all_info(tenant, vnode_id).await?;
+                (
+                    AdminStatementRequest {
+                        tenant: tenant.to_string(),
+                        stmt: AdminStatementType::DeleteVnode {
+                            db: all_info.db_name.clone(),
+                            vnode_id,
+                        },
                     },
-                },
-                all_info.node_id,
-            ),
+                    all_info.node_id,
+                )
+            }
+
+            VnodeManagerCmdType::Compact => {
+                let meta = self.meta.admin_meta();
+
+                // Group vnode ids by node id.
+                let mut node_vnode_ids_map: HashMap<u64, Vec<u32>> = HashMap::new();
+                for vnode_id in vnode_ids.iter() {
+                    let vnode = self.get_vnode_all_info(tenant, *vnode_id).await?;
+                    node_vnode_ids_map
+                        .entry(vnode.node_id)
+                        .or_default()
+                        .push(*vnode_id);
+                }
+                let nodes = meta.data_nodes().await;
+
+                // Send grouped vnode ids to nodes.
+                let mut req_futures = vec![];
+                for node in nodes {
+                    if let Some(vnode_ids) = node_vnode_ids_map.remove(&node.id) {
+                        let req = AdminStatementRequest {
+                            tenant: tenant.to_string(),
+                            stmt: AdminStatementType::CompactVnode { vnode_ids },
+                        };
+                        let cmd = CoordinatorTcpCmd::AdminStatementCmd(req);
+                        req_futures.push(self.exec_on_node(node.id, cmd));
+                    }
+                }
+                match futures::future::try_join_all(req_futures).await {
+                    Ok(_) => {
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        return Err(CoordinatorError::CommonError {
+                            msg: format!("Failed to compact on VNodes {:?}: {:?}", vnode_ids, e),
+                        })
+                    }
+                };
+            }
         };
 
         let cmd = CoordinatorTcpCmd::AdminStatementCmd(tcp_req);
@@ -299,29 +346,28 @@ impl CoordService {
     }
 
     async fn select_statement_request(
-        kv_inst: EngineRef,
+        kv_inst: Option<EngineRef>,
         meta: MetaRef,
         option: QueryOption,
         sender: Sender<CoordinatorResult<RecordBatch>>,
     ) {
         let tenant = option.tenant.as_str();
 
-        if let Some(meta_client) = meta.tenant_manager().tenant_meta(tenant).await {
-            if let Err(e) =
-                meta_client
-                    .limiter()
-                    .check_query()
-                    .map_err(|e| CoordinatorError::MetaRequest {
-                        msg: format!("{}", e),
-                    })
-            {
-                let _ = sender.send(Err(e)).await;
-            }
+        if let Err(e) = meta
+            .tenant_manager()
+            .limiter(tenant)
+            .await
+            .check_query()
+            .await
+            .map_err(|e| CoordinatorError::Meta { source: e })
+        {
+            let _ = sender.send(Err(e)).await;
+            return;
         }
 
         let now = tokio::time::Instant::now();
         info!("select statement execute now: {:?}", now);
-        let executor = QueryExecutor::new(option, kv_inst, meta, sender.clone());
+        let executor = QueryExecutor::new(option, kv_inst.clone(), meta, sender.clone());
         if let Err(err) = executor.execute().await {
             info!(
                 "select statement execute failed: {}, start at: {:?} elapsed: {:?}",
@@ -394,7 +440,7 @@ impl Coordinator for CoordService {
         self.meta.clone()
     }
 
-    fn store_engine(&self) -> EngineRef {
+    fn store_engine(&self) -> Option<EngineRef> {
         self.kv_inst.clone()
     }
 
@@ -406,16 +452,14 @@ impl Coordinator for CoordService {
         &self,
         tenant: String,
         level: ConsistencyLevel,
-        request: WritePointsRpcRequest,
+        request: WritePointsRequest,
     ) -> CoordinatorResult<()> {
-        if let Some(meta_client) = self.meta.tenant_manager().tenant_meta(&tenant).await {
-            meta_client.limiter().check_write()?;
+        let limiter = self.meta.tenant_manager().limiter(&tenant).await;
+        limiter.check_write().await?;
+        let data_len = request.points.len();
+        limiter.check_data_in(data_len).await?;
 
-            let data_len = request.points.len();
-            meta_client.limiter().check_data_in(data_len)?;
-        }
-
-        let req = WritePointsRequest {
+        let req = WriteRequest {
             tenant: tenant.clone(),
             level,
             request,
@@ -469,7 +513,7 @@ impl Coordinator for CoordService {
         res
     }
 
-    async fn read_record(&self, option: QueryOption) -> CoordinatorResult<ReaderIterator> {
+    fn read_record(&self, option: QueryOption) -> CoordinatorResult<ReaderIterator> {
         let (iterator, sender) = ReaderIterator::new();
 
         tokio::spawn(CoordService::select_statement_request(
@@ -485,9 +529,10 @@ impl Coordinator for CoordService {
     async fn vnode_manager(
         &self,
         tenant: &str,
-        vnode_id: u32,
+        vnode_ids: Vec<u32>,
         cmd_type: VnodeManagerCmdType,
     ) -> CoordinatorResult<()> {
-        self.vnode_manager_request(tenant, vnode_id, cmd_type).await
+        self.vnode_manager_request(tenant, vnode_ids, cmd_type)
+            .await
     }
 }

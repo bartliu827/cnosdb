@@ -1,12 +1,10 @@
-use std::{
-    borrow::Borrow,
-    collections::HashMap,
-    fmt::{Debug, Display},
-    hash::{Hash, Hasher},
-    mem::{self, MaybeUninit},
-    ptr::{self, NonNull},
-    sync::Arc,
-};
+use std::borrow::Borrow;
+use std::collections::HashMap;
+use std::fmt::{Debug, Display};
+use std::hash::{Hash, Hasher};
+use std::mem::{self, MaybeUninit};
+use std::ptr::{self, NonNull};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use utils::BkdrHasher;
@@ -348,7 +346,7 @@ impl<K, V> Drop for Cache<K, V> {
         self.table.drain().for_each(|(_, ent)| unsafe {
             let mut ent = *Box::from_raw(ent.as_ptr());
             ptr::drop_in_place(ent.k.as_mut_ptr());
-            ptr::drop_in_place(ent.k.as_mut_ptr());
+            ptr::drop_in_place(ent.v.as_mut_ptr());
         });
         let _head = unsafe { *Box::from_raw(self.head) };
         let _tail = unsafe { *Box::from_raw(self.tail) };

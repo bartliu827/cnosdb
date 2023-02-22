@@ -3,38 +3,22 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use coordinator::service::CoordinatorRef;
 use derive_builder::Builder;
-use models::{
-    auth::{
-        role::{SystemTenantRole, TenantRoleIdentifier},
-        user::{User, UserInfo, UserOptionsBuilder, ROOT},
-    },
-    oid::Identifier,
-    schema::TenantOptionsBuilder,
-};
-use spi::AuthSnafu;
-use spi::{
-    query::{
-        auth::AccessControlRef, dispatcher::QueryDispatcher, session::IsiphoSessionCtxFactory,
-    },
-    server::dbms::DatabaseManagerSystem,
-    service::protocol::{Query, QueryHandle, QueryId},
-    QueryError,
-};
-use trace::{debug, info};
+use models::auth::user::{User, UserInfo};
+use snafu::ResultExt;
+use spi::query::auth::AccessControlRef;
+use spi::query::dispatcher::QueryDispatcher;
+use spi::query::session::IsiphoSessionCtxFactory;
+use spi::server::dbms::DatabaseManagerSystem;
+use spi::service::protocol::{Query, QueryHandle, QueryId};
+use spi::{AuthSnafu, Result};
+use trace::debug;
 use tskv::kv_option::Options;
 
+use crate::auth::auth_control::{AccessControlImpl, AccessControlNoCheck};
 use crate::dispatcher::manager::SimpleQueryDispatcherBuilder;
+use crate::execution::scheduler::LocalScheduler;
 use crate::sql::optimizer::CascadeOptimizerBuilder;
 use crate::sql::parser::DefaultParser;
-use crate::{
-    auth::auth_control::{AccessControlImpl, AccessControlNoCheck},
-    execution::scheduler::LocalScheduler,
-};
-use meta::error::MetaError;
-use models::schema::{DatabaseSchema, DEFAULT_CATALOG, DEFAULT_DATABASE};
-use snafu::ResultExt;
-use spi::Result;
-use tskv::engine::EngineRef;
 
 #[derive(Builder)]
 pub struct Cnosdbms<D> {
@@ -98,7 +82,6 @@ where
 }
 
 pub async fn make_cnosdbms(
-    _engine: EngineRef,
     coord: CoordinatorRef,
     options: Options,
 ) -> Result<impl DatabaseManagerSystem> {
@@ -110,8 +93,6 @@ pub async fn make_cnosdbms(
     let scheduler = Arc::new(LocalScheduler {});
 
     let queries_limit = options.query.max_server_connections;
-
-    init_metadata(coord.clone()).await?;
 
     let meta_manager = coord.meta_manager();
 
@@ -143,100 +124,21 @@ pub async fn make_cnosdbms(
     Ok(db_server)
 }
 
-async fn init_metadata(coord: CoordinatorRef) -> Result<()> {
-    // init admin
-    let user_manager = coord.meta_manager().user_manager();
-    debug!("Check if system user {} exist", ROOT);
-    if user_manager.user(ROOT).await?.is_none() {
-        info!("Initialize the system user {}", ROOT);
-
-        let options = UserOptionsBuilder::default()
-            .must_change_password(true)
-            .comment("system admin")
-            .build()
-            .expect("failed to init admin user.");
-        let res = user_manager
-            .create_user(ROOT.to_string(), options, true)
-            .await;
-        if let Err(err) = res {
-            match err {
-                MetaError::UserAlreadyExists { .. } => {}
-                _ => return Err(QueryError::Meta { source: err }),
-            }
-        }
-    }
-
-    // init system tenant
-    let tenant_manager = coord.meta_manager().tenant_manager();
-    debug!("Check if system tenant {} exist", DEFAULT_CATALOG);
-    if tenant_manager.tenant(DEFAULT_CATALOG).await?.is_none() {
-        info!("Initialize the system tenant {}", DEFAULT_CATALOG);
-
-        let options = TenantOptionsBuilder::default()
-            .comment("system tenant")
-            .build()
-            .expect("failed to init admin user.");
-        let res = tenant_manager
-            .create_tenant(DEFAULT_CATALOG.to_string(), options)
-            .await;
-        if let Err(err) = res {
-            match err {
-                MetaError::TenantAlreadyExists { .. } => {}
-                _ => return Err(QueryError::Meta { source: err }),
-            }
-        }
-
-        debug!("Add root to the system tenant as owner");
-        if let Some(root) = user_manager.user(ROOT).await? {
-            if let Some(client) = tenant_manager.tenant_meta(DEFAULT_CATALOG).await {
-                let role = TenantRoleIdentifier::System(SystemTenantRole::Owner);
-                if let Err(err) = client.add_member_with_role(*root.id(), role).await {
-                    match err {
-                        MetaError::UserAlreadyExists { .. }
-                        | MetaError::MemberAlreadyExists { .. } => {}
-                        _ => return Err(QueryError::Meta { source: err }),
-                    }
-                }
-            }
-        }
-
-        debug!("Initialize the system database {}", DEFAULT_DATABASE);
-
-        let client =
-            tenant_manager
-                .tenant_meta(DEFAULT_CATALOG)
-                .await
-                .ok_or(MetaError::TenantNotFound {
-                    tenant: DEFAULT_CATALOG.to_string(),
-                })?;
-        let res = client
-            .create_db(DatabaseSchema::new(DEFAULT_CATALOG, DEFAULT_DATABASE))
-            .await;
-        if let Err(err) = res {
-            match err {
-                MetaError::DatabaseAlreadyExists { .. } => {}
-                _ => return Err(QueryError::Meta { source: err }),
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use std::ops::DerefMut;
+
     use chrono::Utc;
     use config::get_config;
     use coordinator::service::MockCoordinator;
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::arrow::util::pretty::pretty_format_batches;
     use models::auth::user::UserInfo;
-    use std::ops::DerefMut;
+    use models::schema::DEFAULT_CATALOG;
+    use spi::service::protocol::ContextBuilder;
     use trace::debug;
 
     use super::*;
-    use datafusion::arrow::{record_batch::RecordBatch, util::pretty::pretty_format_batches};
-    use models::schema::DEFAULT_CATALOG;
-    use spi::service::protocol::ContextBuilder;
-    use tskv::engine::MockEngine;
 
     #[macro_export]
     macro_rules! assert_batches_eq {
@@ -279,13 +181,9 @@ mod tests {
     async fn test_simple_sql() {
         let config = get_config("../../config/config.toml");
         let opt = Options::from(&config);
-        let db = make_cnosdbms(
-            Arc::new(MockEngine::default()),
-            Arc::new(MockCoordinator::default()),
-            opt,
-        )
-        .await
-        .unwrap();
+        let db = make_cnosdbms(Arc::new(MockCoordinator::default()), opt)
+            .await
+            .unwrap();
 
         let mut result = exec_sql(&db, "SELECT * FROM (VALUES (1, 'one'), (2, 'two'), (3, 'three')) AS t (num,letter) order by num").await;
 
@@ -340,13 +238,9 @@ mod tests {
         // trace::init_default_global_tracing("/tmp", "test_rust.log", "debug");
         let config = get_config("../../config/config.toml");
         let opt = Options::from(&config);
-        let db = make_cnosdbms(
-            Arc::new(MockEngine::default()),
-            Arc::new(MockCoordinator::default()),
-            opt,
-        )
-        .await
-        .unwrap();
+        let db = make_cnosdbms(Arc::new(MockCoordinator::default()), opt)
+            .await
+            .unwrap();
 
         let sql = format!(
             "SELECT * FROM
@@ -381,13 +275,9 @@ mod tests {
         // trace::init_default_global_tracing("/tmp", "test_rust.log", "debug");
         let config = get_config("../../config/config.toml");
         let opt = Options::from(&config);
-        let db = make_cnosdbms(
-            Arc::new(MockEngine::default()),
-            Arc::new(MockCoordinator::default()),
-            opt,
-        )
-        .await
-        .unwrap();
+        let db = make_cnosdbms(Arc::new(MockCoordinator::default()), opt)
+            .await
+            .unwrap();
 
         let mut result = exec_sql(
             &db,
@@ -421,13 +311,9 @@ mod tests {
     async fn test_create_external_csv_table() {
         let config = get_config("../../config/config.toml");
         let opt = Options::from(&config);
-        let db = make_cnosdbms(
-            Arc::new(MockEngine::default()),
-            Arc::new(MockCoordinator::default()),
-            opt,
-        )
-        .await
-        .unwrap();
+        let db = make_cnosdbms(Arc::new(MockCoordinator::default()), opt)
+            .await
+            .unwrap();
 
         assert_batches_eq!(
             vec!["++", "++", "++",],
@@ -481,13 +367,9 @@ mod tests {
     async fn test_create_external_parquet_table() {
         let config = get_config("../../config/config.toml");
         let opt = Options::from(&config);
-        let db = make_cnosdbms(
-            Arc::new(MockEngine::default()),
-            Arc::new(MockCoordinator::default()),
-            opt,
-        )
-        .await
-        .unwrap();
+        let db = make_cnosdbms(Arc::new(MockCoordinator::default()), opt)
+            .await
+            .unwrap();
 
         assert_batches_eq!(
             vec!["++", "++", "++",],
@@ -533,13 +415,9 @@ mod tests {
     async fn test_create_external_json_table() {
         let config = get_config("../config/config.toml");
         let opt = Options::from(&config);
-        let db = make_cnosdbms(
-            Arc::new(MockEngine::default()),
-            Arc::new(MockCoordinator::default()),
-            opt,
-        )
-        .await
-        .unwrap();
+        let db = make_cnosdbms(Arc::new(MockCoordinator::default()), opt)
+            .await
+            .unwrap();
 
         assert_batches_eq!(
             vec!["++", "++", "++",],

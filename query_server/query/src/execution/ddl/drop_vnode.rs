@@ -1,13 +1,9 @@
 use async_trait::async_trait;
-
-use spi::query::{
-    execution::{Output, QueryStateMachineRef},
-    logical_planner::DropVnode,
-};
+use spi::query::execution::{Output, QueryStateMachineRef};
+use spi::query::logical_planner::DropVnode;
+use spi::Result;
 
 use super::DDLDefinitionTask;
-
-use spi::Result;
 
 pub struct DropVnodeTask {
     stmt: DropVnode,
@@ -28,7 +24,9 @@ impl DDLDefinitionTask for DropVnodeTask {
 
         let coord = query_state_machine.coord.clone();
         let cmd_type = coordinator::command::VnodeManagerCmdType::Drop;
-        coord.vnode_manager(tenant, vnode_id, cmd_type).await?;
+        coord
+            .vnode_manager(tenant, vec![vnode_id], cmd_type)
+            .await?;
 
         Ok(Output::Nil(()))
     }

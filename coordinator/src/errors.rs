@@ -1,9 +1,12 @@
+use std::fmt::Debug;
+use std::io;
+
 use datafusion::arrow::error::ArrowError;
 use datafusion::error::DataFusionError;
+use flatbuffers::InvalidFlatbuffer;
 use meta::error::MetaError;
 use models::error_code::{ErrorCode, ErrorCoder};
 use snafu::Snafu;
-use std::{fmt::Debug, io};
 
 #[derive(Snafu, Debug, ErrorCoder)]
 #[snafu(visibility(pub))]
@@ -113,6 +116,13 @@ pub enum CoordinatorError {
         id: u32,
         elapsed: String,
     },
+
+    #[snafu(display("kv instance not found: node_id:{}, vnode_id:{}", node_id, vnode_id))]
+    #[error_code(code = 18)]
+    KvInstanceNotFound {
+        vnode_id: u32,
+        node_id: u64,
+    },
 }
 
 impl From<meta::error::MetaError> for CoordinatorError {
@@ -196,6 +206,12 @@ impl CoordinatorError {
             CoordinatorError::TskvError { source } => source.error_code(),
             _ => self,
         }
+    }
+}
+
+impl From<flatbuffers::InvalidFlatbuffer> for CoordinatorError {
+    fn from(value: InvalidFlatbuffer) -> Self {
+        Self::InvalidFlatbuffer { source: value }
     }
 }
 

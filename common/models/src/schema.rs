@@ -9,16 +9,12 @@
 
 use std::collections::HashMap;
 use std::fmt::{self, Display};
-use std::sync::Arc;
-
 use std::mem::size_of_val;
 use std::str::FromStr;
-
-use datafusion::logical_expr::TableSource;
-use derive_builder::Builder;
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use arrow_schema::DataType;
+use config::{RequestLimiterConfig, TenantLimiterConfig, TenantObjectLimiterConfig};
 use datafusion::arrow::datatypes::{
     DataType as ArrowDataType, Field as ArrowField, Schema, SchemaRef, TimeUnit,
 };
@@ -30,9 +26,11 @@ use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::ListingOptions;
 use datafusion::error::Result as DataFusionResult;
+use datafusion::logical_expr::TableSource;
+use derive_builder::Builder;
+use serde::{Deserialize, Serialize};
 
 use crate::codec::Encoding;
-pub use crate::limiter::LimiterConfig;
 use crate::oid::{Identifier, Oid};
 use crate::{ColumnId, SchemaId, ValueType};
 
@@ -49,8 +47,8 @@ pub const DEFAULT_CATALOG: &str = "cnosdb";
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TableSchema {
-    TsKvTableSchema(TskvTableSchema),
-    ExternalTableSchema(ExternalTableSchema),
+    TsKvTableSchema(Arc<TskvTableSchema>),
+    ExternalTableSchema(Arc<ExternalTableSchema>),
 }
 
 impl TableSchema {
@@ -101,7 +99,7 @@ impl ExternalTableSchema {
             FileType::CSV => Arc::new(
                 CsvFormat::default()
                     .with_has_header(self.has_header)
-                    .with_delimiter(self.delimiter as u8)
+                    .with_delimiter(self.delimiter)
                     .with_file_compression_type(file_compression_type),
             ),
             FileType::PARQUET => Arc::new(ParquetFormat::default()),
@@ -778,12 +776,26 @@ impl Tenant {
 #[builder(setter(into, strip_option), default)]
 pub struct TenantOptions {
     pub comment: Option<String>,
-    pub limiter_config: Option<LimiterConfig>,
+    pub limiter_config: Option<TenantLimiterConfig>,
 }
 
 impl TenantOptions {
-    pub fn set_limiter(&mut self, limiter_config: Option<LimiterConfig>) {
+    pub fn set_limiter(&mut self, limiter_config: Option<TenantLimiterConfig>) {
         self.limiter_config = limiter_config;
+    }
+
+    pub fn object_config(&self) -> Option<&TenantObjectLimiterConfig> {
+        match self.limiter_config {
+            Some(ref limit_config) => limit_config.object_config.as_ref(),
+            None => None,
+        }
+    }
+
+    pub fn request_config(&self) -> Option<&RequestLimiterConfig> {
+        match self.limiter_config {
+            Some(ref limit_config) => limit_config.request_config.as_ref(),
+            None => None,
+        }
     }
 }
 
@@ -793,13 +805,18 @@ impl Display for TenantOptions {
             write!(f, "comment={},", e)?;
         }
 
+        if let Some(ref e) = self.limiter_config {
+            write!(f, "limiter={e:?},")?;
+        } else {
+            write!(f, "limiter=None,")?;
+        }
+
         Ok(())
     }
 }
 
 pub struct TableSourceAdapter {
     source: Arc<dyn TableSource>,
-
     tenant_id: Oid,
     tenant_name: String,
     database_name: String,
