@@ -26,6 +26,8 @@ trace_http = { path = "../common/trace_http" }
 tskv = { path = "../tskv" }
 utils = { path = "../common/utils" }
 
+tracking-allocator = "0.4.0"
+tikv-jemalloc-sys = { workspace = true }
 actix-web = { workspace = true }
 arrow-flight = { workspace = true, features = ["flight-sql-experimental"] }
 async-backtrace = { workspace = true, optional = true }

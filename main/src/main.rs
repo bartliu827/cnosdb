@@ -22,6 +22,7 @@ use crate::report::ReportService;
 
 mod flight_sql;
 mod http;
+mod memory;
 mod meta_single;
 mod report;
 mod rpc;
@@ -150,7 +151,10 @@ enum CheckCommand {
 
 #[cfg(unix)]
 #[global_allocator]
-static A: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+static A: memory::DebugMemoryAlloc = memory::DebugMemoryAlloc;
+//static A: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+// static GLOBAL: tracking_allocator::Allocator<std::alloc::System> =
+//     tracking_allocator::Allocator::system();
 
 /// To run cnosdb-cli:
 ///
