@@ -148,7 +148,7 @@ unsafe impl GlobalAlloc for DebugMemoryAlloc {
         let new_ptr = unsafe { self.alloc(new_layout) };
 
         unsafe {
-            let size = std::cmp::min(new_layout.size(), new_size);
+            let size = std::cmp::min(layout.size(), new_size);
             std::ptr::copy_nonoverlapping(ptr, new_ptr, size);
             self.dealloc(ptr, layout);
         }
