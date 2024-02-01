@@ -182,12 +182,55 @@ mod test {
     use std::io::{IoSlice, SeekFrom};
     use std::path::PathBuf;
 
+    use tokio_util::sync::CancellationToken;
     use trace::info;
 
     use super::FileManager;
+    use crate::file_system::file::async_file::AsyncFile;
     use crate::file_system::file::cursor::FileCursor;
     use crate::file_system::file::IFile;
     use crate::file_system::file_manager;
+
+    async fn read(file: &AsyncFile, buf: &mut [u8]) -> String {
+        tokio::time::sleep(tokio::time::Duration::from_millis(128)).await;
+
+        file.read_at(0, buf).await.unwrap();
+
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    #[tokio::test]
+    async fn test_read() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let cancel: CancellationToken = CancellationToken::new();
+
+        let path = PathBuf::from("/tmp/test_read_file");
+        let file = file_manager::open_file(&path).await.unwrap();
+
+        let mut buf = [0_u8; 64];
+        let can_tok = cancel.clone();
+        runtime.spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = can_tok.cancelled() => {
+                        break;
+                    }
+
+                     res = read(&file,& mut buf)=>{
+                        println!("----- {}",res);
+                     }
+
+                }
+            }
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+        cancel.cancel();
+        println!("----- cancel.cancel()");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000000)).await;
+    }
 
     #[tokio::test]
     async fn test_get_instance() {

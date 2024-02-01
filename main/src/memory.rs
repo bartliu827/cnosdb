@@ -3,6 +3,7 @@ use core::alloc::{GlobalAlloc, Layout};
 
 use libc::{c_int, c_void};
 use tikv_jemalloc_sys as ffi;
+use tracking_allocator::{AllocationGroupId, AllocationTracker};
 
 #[cfg(all(any(
     target_arch = "arm",
@@ -83,7 +84,8 @@ unsafe fn free_hook(ptr: *mut u8, layout: &Layout) -> *mut u8 {
 
     ptr.cast::<usize>().write(0x1234567890654321_usize);
 
-    if flag != 0x1234567890123456_usize || len != layout.size() {
+    //if flag != 0x1234567890123456_usize || len != layout.size() {
+    if len >= 1842415900 {
         panic!(
             "-------------- free is not right ({} {}) {:#?} ({} {} {})",
             flag,
@@ -167,5 +169,47 @@ unsafe impl GlobalAlloc for DebugMemoryAlloc {
 
         let flags = layout_to_flags(layout.align(), layout.size());
         ffi::sdallocx(ptr as *mut c_void, layout.size(), flags);
+    }
+}
+
+pub(crate) struct StdoutTracker;
+
+// This is our tracker implementation.  You will always need to create an implementation of `AllocationTracker` in order
+// to actually handle allocation events.  The interface is straightforward: you're notified when an allocation occurs,
+// and when a deallocation occurs.
+impl AllocationTracker for StdoutTracker {
+    fn allocated(
+        &self,
+        addr: usize,
+        object_size: usize,
+        wrapped_size: usize,
+        group_id: AllocationGroupId,
+    ) {
+        // Allocations have all the pertinent information upfront, which you may or may not want to store for further
+        // analysis. Notably, deallocations also know how large they are, and what group ID they came from, so you
+        // typically don't have to store much data for correlating deallocations with their original allocation.
+        println!(
+            "alloc -> addr=0x{:0x} object_size={} wrapped_size={} group_id={:?}",
+            addr, object_size, wrapped_size, group_id
+        );
+    }
+
+    fn deallocated(
+        &self,
+        addr: usize,
+        object_size: usize,
+        wrapped_size: usize,
+        source_group_id: AllocationGroupId,
+        current_group_id: AllocationGroupId,
+    ) {
+        // When a deallocation occurs, as mentioned above, you have full access to the address, size of the allocation,
+        // as well as the group ID the allocation was made under _and_ the active allocation group ID.
+        //
+        // This can be useful beyond just the obvious "track how many current bytes are allocated by the group", instead
+        // going further to see the chain of where allocations end up, and so on.
+        println!(
+            "free  -> addr=0x{:0x} object_size={} wrapped_size={} source_group_id={:?} current_group_id={:?}",
+            addr, object_size, wrapped_size, source_group_id, current_group_id
+        );
     }
 }

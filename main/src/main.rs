@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::fmt::Display;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -13,10 +13,15 @@ use metrics::metric_register::MetricsRegister;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tokio::runtime::Runtime;
+use tokio_util::sync::CancellationToken;
 use trace::jaeger::jaeger_exporter;
 use trace::log::{CombinationTraceCollector, LogTraceCollector};
 use trace::{info, init_process_global_tracing, TraceExporter, WorkerGuard};
 use trace_http::ctx::{SpanContextExtractor, TraceHeaderParser};
+use tracking_allocator::AllocationRegistry;
+use tskv::file_system::file::async_file::AsyncFile;
+use tskv::file_system::file::IFile;
+use tskv::file_system::file_manager;
 
 use crate::report::ReportService;
 
@@ -161,8 +166,77 @@ static A: memory::DebugMemoryAlloc = memory::DebugMemoryAlloc;
 /// ```bash
 /// cargo run -- run
 /// ```
+
+fn time_stamp() -> f64 {
+    models::utils::now_timestamp_millis() as f64 / 1000.0
+}
+
+async fn read(file: &AsyncFile) -> usize {
+    let mut buf: Vec<u8> = vec![0_u8; 1842415900];
+
+    println!("{} ----- * before read", time_stamp());
+    let len = file.read_at(0, &mut buf).await.unwrap();
+    println!("{} ----- * after read", time_stamp());
+
+    len
+}
+
+async fn test_read() {
+    //let runtime = tokio::runtime::Runtime::new().unwrap();
+    let cancel: CancellationToken = CancellationToken::new();
+
+    let path = PathBuf::from("/Users/cnosdb/github.com/cnosdb/cnosdb_main/a_big_big_file");
+    let file = file_manager::open_file(&path).await.unwrap();
+
+    println!("{} ----- begin test ------------", time_stamp());
+    let can_tok = cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = can_tok.cancelled() => {
+                    println!("{} ----- cancelled break loop", time_stamp());
+                    break;
+                }
+
+                 res = read(&file) => {
+                    println!("{} ----- read data len: {}", time_stamp(),res);
+                 }
+            }
+        }
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    cancel.cancel();
+    println!("{} ----- cancel.cancel()", time_stamp());
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(5 * 1000)).await;
+    println!("{} ----- test over", time_stamp());
+}
+
 fn main() -> Result<(), std::io::Error> {
+    let _ = AllocationRegistry::set_global_tracker(crate::memory::StdoutTracker)
+        .expect("no other global tracker should be set yet");
+
+    AllocationRegistry::enable_tracking();
+
     signal::install_crash_handler();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(4)
+        .thread_stack_size(4 * 1024 * 1024)
+        .build()
+        .unwrap();
+
+    rt.block_on(async move {
+        test_read().await;
+    });
+
+    println!("------------- wait ctrl_c --------");
+    signal::block_waiting_ctrl_c();
+
+    return Ok(());
+
     let cli = Cli::parse();
     let run_args = match cli.subcmd {
         CliCommand::Run(run_args) => run_args,

@@ -51,6 +51,8 @@ impl RawFile {
             let fd = os::fd(self.0.as_ref());
             let len = asyncify(move || os::pread(fd, pos, len, ptr)).await?;
             Ok(len)
+
+            //os::pread(fd, pos, len, ptr)
         }
     }
 
