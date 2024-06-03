@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use crate::errors::{HeedSnafu, IOErrSnafu, MsgInvalidSnafu, ReplicationResult};
-use crate::node_store::StoredSnapshot;
 use crate::{RaftNodeId, RaftNodeInfo};
 
 pub struct Key {}
@@ -27,6 +26,14 @@ impl Key {
         format!("snapshot_applied_log_{}", id)
     }
 
+    fn purged_log_id(id: u32) -> String {
+        format!("purged_log_id_{}", id)
+    }
+
+    fn vote_key(id: u32) -> String {
+        format!("vote_{}", id)
+    }
+
     fn membership(id: u32) -> String {
         format!("membership_{}", id)
     }
@@ -37,26 +44,6 @@ impl Key {
 
     fn membership_list(id: u32, index: u64) -> String {
         format!("membership_{}_{}", id, index)
-    }
-
-    fn purged_log_id(id: u32) -> String {
-        format!("purged_log_id_{}", id)
-    }
-
-    fn snapshot_index(id: u32) -> String {
-        format!("snapshot_index_{}", id)
-    }
-
-    fn vote_key(id: u32) -> String {
-        format!("vote_{}", id)
-    }
-
-    fn snapshot_key(id: u32) -> String {
-        format!("snapshot_{}", id)
-    }
-
-    fn already_init_key(id: u32) -> String {
-        format!("already_init_{}", id)
     }
 }
 
@@ -133,30 +120,6 @@ impl StateStorage {
 
     fn del(&self, writer: &mut heed::RwTxn, key: &str) -> ReplicationResult<()> {
         self.db.delete(writer, key).context(HeedSnafu)?;
-
-        Ok(())
-    }
-
-    pub fn is_already_init(&self, group_id: u32) -> ReplicationResult<bool> {
-        let reader = self.env.read_txn().context(HeedSnafu)?;
-        if self
-            .db
-            .get(&reader, &Key::already_init_key(group_id))
-            .context(HeedSnafu)?
-            .is_some()
-        {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    pub fn set_init_flag(&self, group_id: u32) -> ReplicationResult<()> {
-        let mut writer = self.writer_txn()?;
-        self.db
-            .put(&mut writer, &Key::already_init_key(group_id), b"true")
-            .context(HeedSnafu)?;
-        writer.commit().context(HeedSnafu)?;
 
         Ok(())
     }
@@ -288,36 +251,6 @@ impl StateStorage {
         Ok(())
     }
 
-    pub fn get_snapshot_index(&self, group_id: u32) -> ReplicationResult<u64> {
-        let reader = self.reader_txn()?;
-        let index: u64 = self
-            .get(&reader, &Key::snapshot_index(group_id))?
-            .unwrap_or(0);
-
-        Ok(index)
-    }
-
-    pub fn set_snapshot_index(&self, group_id: u32, index: u64) -> ReplicationResult<()> {
-        let mut writer = self.writer_txn()?;
-        self.set(&mut writer, &Key::snapshot_index(group_id), &index)?;
-        writer.commit().context(HeedSnafu)?;
-
-        Ok(())
-    }
-
-    pub fn incr_snapshot_index(&self, group_id: u32, add: u64) -> ReplicationResult<u64> {
-        let mut writer = self.writer_txn()?;
-        let index: u64 = self
-            .get(&writer, &Key::snapshot_index(group_id))?
-            .unwrap_or(0)
-            + add;
-
-        self.set(&mut writer, &Key::snapshot_index(group_id), &index)?;
-        writer.commit().context(HeedSnafu)?;
-
-        Ok(index)
-    }
-
     pub fn get_vote(&self, group_id: u32) -> ReplicationResult<Option<Vote<RaftNodeId>>> {
         let reader = self.reader_txn()?;
         let vote_val: Option<Vote<RaftNodeId>> = self.get(&reader, &Key::vote_key(group_id))?;
@@ -328,21 +261,6 @@ impl StateStorage {
     pub fn set_vote(&self, group_id: u32, vote: &Vote<RaftNodeId>) -> ReplicationResult<()> {
         let mut writer = self.writer_txn()?;
         self.set(&mut writer, &Key::vote_key(group_id), vote)?;
-        writer.commit().context(HeedSnafu)?;
-
-        Ok(())
-    }
-
-    pub fn get_snapshot(&self, group_id: u32) -> ReplicationResult<Option<StoredSnapshot>> {
-        let reader = self.reader_txn()?;
-        let snapshot: Option<StoredSnapshot> = self.get(&reader, &Key::snapshot_key(group_id))?;
-
-        Ok(snapshot)
-    }
-
-    pub fn set_snapshot(&self, group_id: u32, snap: StoredSnapshot) -> ReplicationResult<()> {
-        let mut writer = self.writer_txn()?;
-        self.set(&mut writer, &Key::snapshot_key(group_id), &snap)?;
         writer.commit().context(HeedSnafu)?;
 
         Ok(())
@@ -400,10 +318,7 @@ impl StateStorage {
         self.del(&mut writer, &Key::applied_log(group_id))?;
         self.del(&mut writer, &Key::membership(group_id))?;
         self.del(&mut writer, &Key::purged_log_id(group_id))?;
-        self.del(&mut writer, &Key::snapshot_index(group_id))?;
         self.del(&mut writer, &Key::vote_key(group_id))?;
-        self.del(&mut writer, &Key::snapshot_key(group_id))?;
-        self.del(&mut writer, &Key::already_init_key(group_id))?;
         self.del(&mut writer, &Key::node_summary(group_id))?;
         self.del(&mut writer, &Key::snapshot_applied_log(group_id))?;
         for (key, _) in memberships {
@@ -424,6 +339,66 @@ impl StateStorage {
     }
 }
 
+pub fn set_raft_state(path: &str, key: &str, val: &str) {
+    let state = StateStorage::open(path, 1024 * 1024 * 1024).unwrap();
+    let mut writer = state.writer_txn().unwrap();
+    state
+        .db
+        .put(&mut writer, key, val.as_bytes())
+        .context(HeedSnafu)
+        .unwrap();
+    writer.commit().context(HeedSnafu).unwrap();
+}
+
+pub fn print_raft_state(path: &str) {
+    let state = StateStorage::open(path, 1024 * 1024 * 1024).unwrap();
+    let all_nodes = state.all_nodes_summary().unwrap();
+    let reader = state.reader_txn().unwrap();
+
+    for info in all_nodes {
+        println!(
+            "*** group: {}, id: {}, tenant: {}, db-name: {} ***",
+            info.group_id, info.raft_id, info.tenant, info.db_name
+        );
+
+        let key = Key::node_summary(info.group_id);
+        if let Some(data) = state.db.get(&reader, &key).unwrap() {
+            println!("├── {} :{}", key, String::from_utf8_lossy(&data));
+        }
+
+        let key = Key::applied_log(info.group_id);
+        if let Some(data) = state.db.get(&reader, &key).unwrap() {
+            println!("├── {} :{}", key, String::from_utf8_lossy(&data));
+        }
+
+        let key = Key::snapshot_applied_log(info.group_id);
+        if let Some(data) = state.db.get(&reader, &key).unwrap() {
+            println!("├── {} :{}", key, String::from_utf8_lossy(&data));
+        }
+
+        let key = Key::purged_log_id(info.group_id);
+        if let Some(data) = state.db.get(&reader, &key).unwrap() {
+            println!("├── {} :{}", key, String::from_utf8_lossy(&data));
+        }
+
+        let key = Key::vote_key(info.group_id);
+        if let Some(data) = state.db.get(&reader, &key).unwrap() {
+            println!("├── {} :{}", key, String::from_utf8_lossy(&data));
+        }
+
+        let key = Key::membership(info.group_id);
+        if let Some(data) = state.db.get(&reader, &key).unwrap() {
+            println!("├── {} :{}", key, String::from_utf8_lossy(&data));
+        }
+
+        let key = Key::membership_list_prefix(info.group_id);
+        let mut iter = state.db.prefix_iter(&reader, &key).unwrap();
+        while let Some((key, data)) = iter.next().transpose().unwrap() {
+            println!("├── {} :{}", key, String::from_utf8_lossy(&data));
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::fs;
@@ -431,16 +406,6 @@ mod test {
 
     use heed::types::*;
     use heed::Database;
-
-    use super::StateStorage;
-
-    #[test]
-    #[ignore]
-    fn dump_raft_state() {
-        let path = "/tmp/cnosdb/2001/db/raft-state";
-        let state = StateStorage::open(path, 1024 * 1024 * 1024).unwrap();
-        state.debug();
-    }
 
     #[test]
     #[ignore]
