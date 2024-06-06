@@ -28,11 +28,13 @@ mod flatbuffers_generated;
             proto_files_dir.join("kv_service.proto"),
             proto_files_dir.join("vector_event.proto"),
             proto_files_dir.join("raft_service.proto"),
+            proto_files_dir.join("helloworld.proto"),
         ];
         let rust_mod_names = &[
             "kv_service".to_string(),
             "vector".to_string(),
             "raft_service".to_string(),
+            "helloworld".to_string(),
         ];
 
         // src/generated/protobuf_generated/

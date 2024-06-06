@@ -8,7 +8,7 @@ use crate::file_system::file::stream_writer::FileStreamWriter;
 
 pub mod async_filesystem;
 pub mod error;
-pub(crate) mod file;
+pub mod file;
 pub mod file_info;
 
 /// File system operations

@@ -3,6 +3,8 @@ use std::io;
 use std::io::ErrorKind;
 use std::sync::Arc;
 
+use rand::Rng;
+
 use crate::file_system::file;
 use crate::file_system::file::os;
 
@@ -14,6 +16,12 @@ pub struct RawFile(pub(crate) Arc<File>);
 #[cfg(feature = "io_uring")]
 struct RawFile(Arc<File>, Arc<rio::Rio>);
 
+fn now_timestamp_millis() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(n) => n.as_millis() as i64,
+        Err(_) => panic!("SystemTime before UNIX EPOCH!"),
+    }
+}
 impl RawFile {
     pub(crate) fn file_size(&self) -> io::Result<usize> {
         os::file_size(os::fd(self.0.as_ref()))
@@ -28,21 +36,13 @@ impl RawFile {
         unsafe {
             let mut pos = pos;
             file::asyncify(|| {
-                let mut read = 0_usize;
-                while !buf.is_empty() {
-                    match self.pread(pos, buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let tmp = buf;
-                            buf = &mut tmp[n..];
-                            pos += n;
-                            read += n;
-                        }
-                        Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                        Err(e) => return Err(e),
-                    }
+                for i in 0..100 {
+                    self.pread(pos, buf).unwrap();
+
+                    println!("{} over read.... {}", now_timestamp_millis(), i);
                 }
-                Ok(read)
+
+                Ok(10)
             })
             .await
         }

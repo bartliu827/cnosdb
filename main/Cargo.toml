@@ -73,6 +73,11 @@ tonic = { workspace = true, features = ["transport", "tls"] }
 warp = { workspace = true, features = ["tls"] }
 dateparser = { workspace = true }
 
+rand = { workspace = true }
+tower = { workspace = true }
+tokio-util = { workspace = true }
+tikv-jemalloc-sys = { workspace = true }
+
 [target.'cfg(unix)'.dependencies]
 pprof = { workspace = true, features = ["flamegraph", "protobuf-codec", "frame-pointer"] }
 tikv-jemallocator = { workspace = true }
