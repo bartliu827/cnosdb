@@ -73,6 +73,7 @@ impl FlushTask {
             VersionEdit::new_update_vnode(self.tsf_id, self.owner.clone(), high_seq_no);
         let mut max_level_ts = max_level_ts;
         for memcache in self.mem_caches.iter() {
+            info!("------------begin flush cache 1....................");
             let mut tsm_writer_is_used = false;
             let mut delta_writer_is_used = false;
             let file_id = self.global_context.file_id_next();
@@ -81,16 +82,23 @@ impl FlushTask {
             let file_id = self.global_context.file_id_next();
             self.current_delta_file_id = file_id;
             let mut delta_writer = TsmWriter::open(&self.path_delta, file_id, 0, true).await?;
+
+            info!("------------begin flush cache 2....................");
             let (group, delta_group) = memcache.read().to_chunk_group(max_level_ts)?;
+
+            info!("------------begin flush cache 3....................");
             if !group.is_empty() {
                 tsm_writer_is_used = true;
                 tsm_writer.write_data(group).await?;
             }
+            info!("------------begin flush cache 4....................");
 
             if !delta_group.is_empty() {
                 delta_writer_is_used = true;
                 delta_writer.write_data(delta_group).await?;
             }
+
+            info!("------------begin flush cache 5....................");
 
             let compact_meta_builder = CompactMetaBuilder::new(self.tsf_id);
             if tsm_writer_is_used {
@@ -114,6 +122,8 @@ impl FlushTask {
                 info!("Flush: remove unsed file: {:?}, {:?}", path, result);
             }
 
+            info!("------------begin flush cache 6....................");
+
             if delta_writer_is_used {
                 delta_writer.finish().await?;
                 files_meta.insert(
@@ -136,6 +146,8 @@ impl FlushTask {
                 let result = LocalFileSystem::remove_if_exists(path);
                 info!("Flush: remove unsed file: {:?}, {:?}", path, result);
             }
+
+            info!("------------begin flush cache 7....................");
         }
         Ok((version_edit, files_meta))
     }
