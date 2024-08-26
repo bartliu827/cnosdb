@@ -214,7 +214,13 @@ impl TsmWriter {
     pub async fn write_data(&mut self, groups: TsmWriteData) -> TskvResult<()> {
         // write page data
         for (schema, group) in groups {
+            trace::info!("------------write_data size: {}......", group.len());
             for (series, (series_buf, record_batch)) in group {
+                trace::info!(
+                    "------------write_data size: {} {}......",
+                    record_batch.num_rows(),
+                    record_batch.num_columns()
+                );
                 self.write_record_batch(series, series_buf, schema.clone(), record_batch)
                     .await?;
             }
