@@ -216,11 +216,6 @@ impl TsmWriter {
         for (schema, group) in groups {
             trace::info!("------------write_data size: {}......", group.len());
             for (series, (series_buf, record_batch)) in group {
-                trace::info!(
-                    "------------write_data size: {} {}......",
-                    record_batch.num_rows(),
-                    record_batch.num_columns()
-                );
                 self.write_record_batch(series, series_buf, schema.clone(), record_batch)
                     .await?;
             }
@@ -458,11 +453,17 @@ impl TsmWriter {
     }
 
     pub async fn finish(&mut self) -> TskvResult<()> {
+        trace::info!("------------begin finish 1....................");
         let series_meta = self.write_chunk().await?;
+        trace::info!("------------begin finish 2....................");
         self.write_chunk_group().await?;
+        trace::info!("------------begin finish 3....................");
         self.write_chunk_group_specs(series_meta).await?;
+        trace::info!("------------begin finish 4....................");
         self.write_footer().await?;
+        trace::info!("------------begin finish 5....................");
         self.writer.flush().await.context(IOSnafu)?;
+        trace::info!("------------begin finish 6....................");
         self.state = State::Finished;
         Ok(())
     }
