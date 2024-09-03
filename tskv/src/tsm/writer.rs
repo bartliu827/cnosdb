@@ -453,17 +453,11 @@ impl TsmWriter {
     }
 
     pub async fn finish(&mut self) -> TskvResult<()> {
-        trace::info!("------------begin finish 1....................");
         let series_meta = self.write_chunk().await?;
-        trace::info!("------------begin finish 2....................");
         self.write_chunk_group().await?;
-        trace::info!("------------begin finish 3....................");
         self.write_chunk_group_specs(series_meta).await?;
-        trace::info!("------------begin finish 4....................");
         self.write_footer().await?;
-        trace::info!("------------begin finish 5....................");
         self.writer.flush().await.context(IOSnafu)?;
-        trace::info!("------------begin finish 6....................");
         self.state = State::Finished;
         Ok(())
     }
