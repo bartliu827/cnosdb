@@ -69,6 +69,7 @@ impl FlushTask {
             VersionEdit::new_update_vnode(self.tsf_id, self.owner.clone(), high_seq_no);
         let mut max_level_ts = max_level_ts;
         for memcache in self.mem_caches.iter() {
+            info!("------------ flush mmecache 1");
             let file_id = memcache.read().tsm_file_id();
             self.current_tsm_file_id = file_id;
             let mut tsm_writer = TsmWriter::open(&self.path_tsm, file_id, 0, false).await?;
@@ -119,6 +120,8 @@ impl FlushTask {
                 }
             }
 
+            info!("------------ flush mmecache 2");
+
             if tsm_writer_is_used {
                 tsm_writer.finish().await?;
                 files_meta.insert(
@@ -164,6 +167,8 @@ impl FlushTask {
                 let result = LocalFileSystem::remove_if_exists(path);
                 info!("Flush: remove unsed file: {:?}, {:?}", path, result);
             }
+
+            info!("------------ flush mmecache 3");
         }
 
         Ok((version_edit, files_meta))
