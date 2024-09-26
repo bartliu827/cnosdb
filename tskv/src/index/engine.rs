@@ -396,7 +396,7 @@ mod test {
     #[tokio::test]
     async fn scan_engine() {
         println!("------ begin....");
-        let path = "/nvme/yanyun/datas/1001/db/data/cnosdb.db1/66/index";
+        let path = "/nvme/yanyun/datas/1001/db/data/cnosdb.db1/3/index";
         let engine = IndexEngine::new(path).unwrap();
         let iter = engine.db.try_iter();
 
