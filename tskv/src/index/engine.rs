@@ -392,4 +392,38 @@ mod test {
         println!("=== {:?}", engine.delete(b"key3"));
         println!("=== {:?}", engine.get(b"key3"));
     }
+
+    #[tokio::test]
+    async fn scan_engine() {
+        println!("------ begin....");
+        let path = "/nvme/yanyun/datas/1001/db/data/cnosdb.db1/66/index";
+        let engine = IndexEngine::new(path).unwrap();
+        let iter = engine.db.try_iter();
+
+        let mut id_info = (0, 0, 0);
+        let mut key_info = (0, 0, 0);
+        let mut inverted = (0, 0, 0);
+        for item in iter {
+            let item = item.unwrap();
+            let key = item.0;
+            let val = engine.load(&item.1).unwrap();
+            if key.starts_with("_id_".as_bytes()) {
+                id_info.0 += 1;
+                id_info.1 += key.len();
+                id_info.2 += val.len();
+            } else if key.starts_with("_key_".as_bytes()) {
+                key_info.0 += 1;
+                key_info.1 += key.len();
+                key_info.2 += val.len();
+            } else {
+                inverted.0 += 1;
+                inverted.1 += key.len();
+                inverted.2 += val.len();
+            }
+        }
+
+        println!("------ series id: {:?}", id_info);
+        println!("------ series key: {:?}", key_info);
+        println!("------ series inverted: {:?}", inverted);
+    }
 }
