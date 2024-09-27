@@ -395,7 +395,7 @@ mod test {
 
     #[tokio::test]
     async fn scan_engine() {
-        println!("------ begin....");
+        println!("------scan begin....");
         let path = "/nvme/yanyun/datas/1001/db/data/cnosdb.db1/3/index";
         let engine = IndexEngine::new(path).unwrap();
         let iter = engine.db.try_iter();
@@ -425,5 +425,28 @@ mod test {
         println!("------ series id: {:?}", id_info);
         println!("------ series key: {:?}", key_info);
         println!("------ series inverted: {:?}", inverted);
+    }
+
+    #[tokio::test]
+    async fn copy_engine() {
+        println!("------ copy begin....");
+        let path = "/nvme/yanyun/datas/1001/db/data/cnosdb.db1/3/index";
+        let engine = IndexEngine::new(path).unwrap();
+        let iter = engine.db.try_iter();
+
+        let mut key_count = 0;
+        let mut dst_engine = IndexEngine::new("/nvme/yanyun/datas/rewrite_index").unwrap();
+        for item in iter {
+            let item = item.unwrap();
+            let key = item.0;
+            let val = engine.load(&item.1).unwrap();
+
+            key_count += 1;
+            dst_engine.set(&key, &val).unwrap();
+        }
+
+        dst_engine.flush().unwrap();
+
+        println!("-------- key count: {}", key_count);
     }
 }
