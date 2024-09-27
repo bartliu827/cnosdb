@@ -395,10 +395,12 @@ mod test {
 
     #[tokio::test]
     async fn scan_engine() {
-        println!("------scan begin....");
-        let path = "/nvme/yanyun/datas/1001/db/data/cnosdb.db1/3/index";
+        let path = "/nvme/yanyun/datas/rewrite_index";
+        //let path = "/nvme/yanyun/datas/1001/db/data/cnosdb.db1/3/index";
         let engine = IndexEngine::new(path).unwrap();
         let iter = engine.db.try_iter();
+
+        println!("------scan begin.... {}", path);
 
         let mut id_info = (0, 0, 0);
         let mut key_info = (0, 0, 0);
