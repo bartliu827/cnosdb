@@ -392,4 +392,31 @@ mod test {
         println!("=== {:?}", engine.delete(b"key3"));
         println!("=== {:?}", engine.get(b"key3"));
     }
+
+    #[test]
+    fn debug_engine0() {
+        let path = std::path::PathBuf::from("/tmp/test/index.db");
+        println!("Creating index engine : {:?}", path);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path.clone())
+            .unwrap();
+        let store = radixdb::store::PagedFileStore::new(file, 1024 * 1024).unwrap();
+        println!("--------last_id: {:?}", store.last_id());
+        let mut db = radixdb::RadixTree::try_load(store.clone(), store.last_id()).unwrap();
+
+        let start = std::time::Instant::now();
+        for i in 0..=1000000 {
+            let val = "abc123efg0".repeat(100);
+            db.try_insert(format!("_key_{}", i), val).unwrap();
+
+            if i % 100000 == 0 {
+                db.try_reattach().unwrap();
+                let meta = std::fs::metadata(&path).unwrap();
+                println!("{} {:#?}  file size : {}", i, start.elapsed(), meta.len());
+            }
+        }
+    }
 }

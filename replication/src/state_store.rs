@@ -475,4 +475,42 @@ mod test {
 
         fs::remove_dir_all(path).unwrap();
     }
+
+    #[test]
+    fn debug_engine0() {
+        let path = std::path::PathBuf::from("/tmp/test/lmdb");
+        fs::create_dir_all(&path).unwrap();
+
+        let mut env_builder = heed::EnvOpenOptions::new();
+        unsafe {
+            env_builder.flag(heed::flags::Flags::MdbNoSync);
+        }
+
+        let env = env_builder
+            .map_size(1024 * 1000 * 1000 * 1000)
+            .max_dbs(1)
+            .open(path.clone())
+            .unwrap();
+        let db: Database<Str, OwnedSlice<u8>> = env.create_database(Some("data")).unwrap();
+
+        let start = std::time::Instant::now();
+        for i in 0..=1000000 {
+            let key = format!("_key_{}", i);
+            let val = "abc123efg0".repeat(100);
+
+            let mut writer = env.write_txn().unwrap();
+            db.put(&mut writer, &key, val.as_bytes()).unwrap();
+            //db.delete(&mut writer, &key).unwrap();
+            writer.commit().unwrap();
+
+            if i % 100000 == 0 {
+                //db.try_reattach().unwrap();
+                let meta = std::fs::metadata(&path.join("data.mdb")).unwrap();
+                println!("{} {:#?} file size : {}", i, start.elapsed(), meta.len());
+            }
+        }
+
+        let reader = env.read_txn().unwrap();
+        db.get(&reader, "xxxxx").unwrap();
+    }
 }
