@@ -13,7 +13,8 @@ use snafu::{OptionExt, ResultExt};
 use tokio::sync::RwLock;
 
 use super::cache::IndexCache;
-use super::{DecodeSeriesKeySnafu, IndexEngine, IndexResult};
+use super::engine2::IndexEngine2;
+use super::{DecodeSeriesKeySnafu, IndexResult};
 use crate::error::{ColumnNotFoundSnafu, IndexErrSnafu};
 use crate::index::SeriesAlreadyExistsSnafu;
 use crate::{byte_utils, TskvError, UpdateSetValue};
@@ -83,14 +84,14 @@ pub struct TSIndex {
     incr_id: AtomicU32,
     write_count: AtomicU32,
 
-    storage: IndexEngine,
+    storage: IndexEngine2,
     cache: IndexCache,
 }
 
 impl TSIndex {
     pub async fn new(path: impl AsRef<Path>, cap: u64) -> IndexResult<Arc<RwLock<Self>>> {
         let path = path.as_ref();
-        let storage = IndexEngine::new(path)?;
+        let storage = IndexEngine2::new(path)?;
 
         let incr_id = match storage.get(AUTO_INCR_ID_KEY.as_bytes())? {
             Some(data) => byte_utils::decode_be_u32(&data),

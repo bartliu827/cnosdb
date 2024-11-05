@@ -273,7 +273,7 @@ impl IndexMemCache {
         bitmap
     }
 
-    pub async fn flush(&mut self, storage: &mut super::IndexEngine) -> IndexResult<()> {
+    pub async fn flush(&mut self, storage: &mut super::engine2::IndexEngine2) -> IndexResult<()> {
         // flush forward index
         for (id, key) in self.id_map.iter() {
             trace::debug!("--- Index flush new series id:{}, key: {}", id, key.key);
