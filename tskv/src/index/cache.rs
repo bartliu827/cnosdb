@@ -313,6 +313,7 @@ impl IndexMemCache {
             }
         }
         writer.commit().unwrap();
+        storage.flush().unwrap();
 
         self.id_map.clear();
         self.key_map.clear();
