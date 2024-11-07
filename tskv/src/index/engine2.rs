@@ -15,7 +15,7 @@ use super::{IndexResult, IndexStorageSnafu, RoaringBitmapSnafu};
 
 pub struct IndexEngine2 {
     env: Env,
-    db: Database<OwnedSlice<u8>, OwnedSlice<u8>>,
+    pub db: Database<OwnedSlice<u8>, OwnedSlice<u8>>,
 }
 
 impl IndexEngine2 {
@@ -42,7 +42,7 @@ impl IndexEngine2 {
         Ok(Self { env, db })
     }
 
-    fn reader_txn(&self) -> IndexResult<heed::RoTxn> {
+    pub fn reader_txn(&self) -> IndexResult<heed::RoTxn> {
         let reader = self
             .env
             .read_txn()
@@ -51,7 +51,7 @@ impl IndexEngine2 {
         Ok(reader)
     }
 
-    fn writer_txn(&self) -> IndexResult<heed::RwTxn> {
+    pub fn writer_txn(&self) -> IndexResult<heed::RwTxn> {
         let writer = self
             .env
             .write_txn()
@@ -108,6 +108,7 @@ impl IndexEngine2 {
     }
 
     pub fn flush(&mut self) -> IndexResult<()> {
+        let _ = self.env.force_sync();
         Ok(())
     }
 

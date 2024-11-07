@@ -275,11 +275,21 @@ impl IndexMemCache {
 
     pub async fn flush(&mut self, storage: &mut super::engine2::IndexEngine2) -> IndexResult<()> {
         // flush forward index
+        let mut writer = storage.writer_txn().unwrap();
         for (id, key) in self.id_map.iter() {
             trace::debug!("--- Index flush new series id:{}, key: {}", id, key.key);
             let key_buf = encode_series_key(key.key.table(), key.key.tags());
-            storage.set(&key_buf, &id.to_be_bytes())?;
-            storage.set(&encode_series_id_key(*id), &key.key.encode())?;
+            // storage.set(&key_buf, &id.to_be_bytes())?;
+            // storage.set(&encode_series_id_key(*id), &key.key.encode())?;
+
+            storage
+                .db
+                .put(&mut writer, &key_buf, &id.to_be_bytes())
+                .unwrap();
+            storage
+                .db
+                .put(&mut writer, &encode_series_id_key(*id), &key.key.encode())
+                .unwrap();
         }
 
         // flush inverted index
@@ -287,10 +297,22 @@ impl IndexMemCache {
             for (tag_key, values) in tags {
                 for (tag_val, rb) in values {
                     let key = encode_inverted_index_key(tab, tag_key, tag_val);
-                    storage.merge_rb(&key, rb)?;
+                    //storage.merge_rb(&key, rb)?;
+
+                    let mut bytes = vec![];
+                    if let Some(data) = storage.db.get(&writer, &key).unwrap() {
+                        let value = roaring::RoaringBitmap::deserialize_from(&*data).unwrap();
+                        let value = value.bitor(rb);
+                        value.serialize_into(&mut bytes).unwrap();
+                    } else {
+                        rb.serialize_into(&mut bytes).unwrap();
+                    }
+
+                    storage.db.put(&mut writer, &key, &bytes).unwrap();
                 }
             }
         }
+        writer.commit().unwrap();
 
         self.id_map.clear();
         self.key_map.clear();
