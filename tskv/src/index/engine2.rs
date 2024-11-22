@@ -29,9 +29,9 @@ impl IndexEngine2 {
         }
 
         let env = env_builder
-            .map_size(1024 * 1024 * 1024 * 128)
+            .map_size(1024 * 1024)
             .max_dbs(1)
-            .max_readers(1024)
+            .max_readers(32)
             .open(path)
             .map_err(|e| IndexStorageSnafu { msg: e.to_string() }.build())?;
         let db: Database<OwnedSlice<u8>, OwnedSlice<u8>> = env
@@ -355,5 +355,23 @@ mod test {
         println!("------ series id: {:?}", id_info);
         println!("------ series key: {:?}", key_info);
         println!("------ series inverted: {:?}", inverted);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_enginexxx() {
+        for i in 1..2000 {
+            let path = format!("/tmp/test/{}", i);
+            let engine = IndexEngine2::new(path).unwrap();
+            let value = "v_1234567890".repeat(3);
+            let key = format!("_key_1");
+            engine.set(key.as_bytes(), value.as_bytes()).unwrap();
+
+            engine.flush().unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            println!("----------------------- {}", i);
+        }
+
+        println!("--------------------------------------------");
     }
 }
