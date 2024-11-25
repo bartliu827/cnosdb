@@ -6,7 +6,6 @@ use bytes::BufMut;
 use heed::flags::Flags;
 use heed::types::*;
 use heed::{Database, Env};
-use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 use roaring::RoaringBitmap;
 use snafu::ResultExt;
@@ -26,7 +25,7 @@ static LMDB_ENV: Lazy<Env> = Lazy::new(|| {
 
     let env = env_builder
         .map_size(1024 * 1024 * 1024 * 128)
-        .max_dbs(1)
+        .max_dbs(1024)
         .max_readers(1024)
         .open(path)
         .unwrap();
