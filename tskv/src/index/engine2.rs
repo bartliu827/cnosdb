@@ -6,11 +6,33 @@ use bytes::BufMut;
 use heed::flags::Flags;
 use heed::types::*;
 use heed::{Database, Env};
+use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use roaring::RoaringBitmap;
 use snafu::ResultExt;
 use trace::info;
 
 use super::{IndexResult, IndexStorageSnafu, RoaringBitmapSnafu};
+
+static LMDB_ENV: Lazy<Env> = Lazy::new(|| {
+    let path = Path::new("/nvme/yanyun/datas/1001/db/index");
+    let _ = fs::create_dir_all(path);
+    info!("Using index engine path : {:?}", path);
+
+    let mut env_builder = heed::EnvOpenOptions::new();
+    unsafe {
+        env_builder.flag(Flags::MdbNoSync);
+    }
+
+    let env = env_builder
+        .map_size(1024 * 1024 * 1024 * 128)
+        .max_dbs(1)
+        .max_readers(1024)
+        .open(path)
+        .unwrap();
+
+    env
+});
 
 pub struct IndexEngine2 {
     env: Env,
@@ -18,7 +40,7 @@ pub struct IndexEngine2 {
 }
 
 impl IndexEngine2 {
-    pub fn new(path: impl AsRef<Path>) -> IndexResult<Self> {
+    pub fn index_env(path: impl AsRef<Path>) -> IndexResult<Env> {
         let path = path.as_ref();
         let _ = fs::create_dir_all(path);
         info!("Using index engine path : {:?}", path);
@@ -30,12 +52,20 @@ impl IndexEngine2 {
 
         let env = env_builder
             .map_size(1024 * 1024 * 1024 * 128)
-            .max_dbs(1)
-            .max_readers(1024)
+            .max_dbs(1024 * 20)
+            .max_readers(1024 * 100)
             .open(path)
             .map_err(|e| IndexStorageSnafu { msg: e.to_string() }.build())?;
+
+        Ok(env)
+    }
+
+    pub fn new(path: impl AsRef<Path>) -> IndexResult<Self> {
+        //let env = Self::index_env(path)?;
+        let env = LMDB_ENV.clone();
+        let db_name = path.as_ref().to_str().unwrap();
         let db: Database<OwnedSlice<u8>, OwnedSlice<u8>> = env
-            .create_database(Some("data"))
+            .create_database(Some(db_name))
             .map_err(|e| IndexStorageSnafu { msg: e.to_string() }.build())?;
 
         Ok(Self { env, db })
