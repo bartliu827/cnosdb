@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use cache::{ShardedSyncCache, SyncCache};
 use maplit::{btreemap, hashmap};
+use models::utils::now_timestamp_millis;
 use models::{SeriesId, SeriesKey};
+use trace::info;
 
 use super::ts_index::{encode_inverted_index_key, encode_series_key};
 use super::{IndexResult, IndexStorageSnafu};
@@ -274,8 +276,10 @@ impl IndexMemCache {
     }
 
     pub async fn flush(&mut self, storage: &super::engine2::IndexEngine2) -> IndexResult<()> {
+        let timestamp0 = now_timestamp_millis();
         // flush forward index
         let mut writer = storage.writer_txn()?;
+        let timestamp1 = now_timestamp_millis();
         for (id, key) in self.id_map.iter() {
             trace::debug!("--- Index flush new series id:{}, key: {}", id, key.key);
             let key_buf = encode_series_key(key.key.table(), key.key.tags());
@@ -285,6 +289,7 @@ impl IndexMemCache {
             storage.txn_write(&key_buf, &id.to_be_bytes(), &mut writer)?;
             storage.txn_write(&encode_series_id_key(*id), &key.key.encode(), &mut writer)?;
         }
+        let timestamp2 = now_timestamp_millis();
 
         // flush inverted index
         for (tab, tags) in self.inverted.iter() {
@@ -296,14 +301,27 @@ impl IndexMemCache {
                 }
             }
         }
+        let timestamp3 = now_timestamp_millis();
         writer
             .commit()
             .map_err(|e| IndexStorageSnafu { msg: e.to_string() }.build())?;
+        let timestamp4 = now_timestamp_millis();
         storage.flush()?;
+        let timestamp5 = now_timestamp_millis();
 
         self.id_map.clear();
         self.key_map.clear();
         self.inverted.clear();
+        let timestamp6 = now_timestamp_millis();
+        info!(
+            "------index flush: {} {} {} {} {} {}",
+            timestamp1 - timestamp0,
+            timestamp2 - timestamp1,
+            timestamp3 - timestamp2,
+            timestamp4 - timestamp3,
+            timestamp5 - timestamp4,
+            timestamp6 - timestamp5,
+        );
 
         Ok(())
     }
